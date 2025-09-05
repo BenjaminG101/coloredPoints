@@ -13,5 +13,5 @@ Starting image:
 Result:
 <p>
   <img src="/result/result1.png" width="1000" />
-    <img src="/result/result1.png" width="1000" />
+    <img src="/result/result2.png" width="1000" />
 </p>
