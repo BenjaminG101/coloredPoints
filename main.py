@@ -1,73 +1,83 @@
-# This is a sample Python script.
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
-# Change this to the directory where you store KITTI data
+import numpy as np
+import pykitti
+import open3d as o3d
 
 Odo_Dir = 'KITTI_SAMPLE/ODOMETRY'
 RAW_Dir = 'KITTI_SAMPLE/RAW'
 date = '2011_09_26'
 drive = '0009'
 
-# Specify the dataset to load
-sequence = '04'
-import pykitti
-
 # Load the data
-data = pykitti.raw(RAW_Dir, date, drive, frames=range(0, 50, 1))
+data = pykitti.raw(RAW_Dir, date, drive)
 
-#load the image from the Pykitti database
-import numpy as np
-image = np.array(data.get_cam2(0), dtype='uint8')
+all_points = []
+all_colors = []
 
-#read the velo information from the dataset
-velo = data.get_velo(0)
-print(velo)
+# Loop through each frame, process and add points
+for i in range(51):
 
-print(np.shape(velo)) #(122320, 4) we have 4*4 velo informations
-# remove depth inferior to 5 (by the first element 'x values')
-velo_data_clipped = velo[velo[:,0]>5]
-print(velo_data_clipped)
-print(np.shape(velo_data_clipped))#(27608, 4)
+    # Load LiDAR points
+    velo = data.get_velo(i)
+    # Filter points: remove very close or very far points
+    velo_data_clipped = (velo[:, 0] > 2) & (velo[:, 0] < 50)
+    velo = velo[velo_data_clipped]
+    # filter out reflective points
+    points = velo[:, :3]
 
-# extract projection matrix from Lidar to camera
-calcam = data.calib.T_cam2_velo #T"
-print(calcam)
-print(len(calcam))# 4
+    # Transform LiDAR points to world frame
+    pose = data.oxts[i].T_w_imu  # 4x4 transformation matrix, rotation and translation
+    points_h = np.hstack((points, np.ones((points.shape[0], 1)))) # adds 1 (x, y, z, 1) n x 4
+    points_world = (pose @ points_h.T).T[:, :3] # matrix transformation but points made into vertical form to allow for multiplication
 
-# extract K matrix of camera 2
-K = np.array(data.calib.K_cam2) # Camera intrinsic parameter K
+    # Same size array as point world, fill with Default gray color
+    colors = np.ones_like(points_world) * 0.5
 
-#Make K matrix the same dimension as T"
-K= np.hstack((K,np.zeros((K.shape[0],1))))
-c = [0,0,0,1]
-K = np.vstack([K,c])
-print(K)
+    # Color from camera image
+    image = np.array(data.get_cam2(i), dtype=np.uint8) # Creates an array of pixels to access later
+    calcam = data.calib.T_cam2_velo # matrix with extrinsic parameters to go from lidar to camera coordinates
+    K = np.array(data.calib.K_cam2) # internal parameter matrix
 
-#T = K @ T"
-T = K@calcam
-print(T)
+    # Transform points to camera frame
+    points_cam = (calcam @ points_h.T).T[:, :3]
 
-#Do the Projection
-P = T@velo_data_clipped.T
-print(P)
-P_2D = P[:2]/P[2, :]
-print(P_2D)
-imgw , imgh = image.shape[:2]
+    # Only keep points in front of camera
+    mask_front = points_cam[:, 2] > 0
+    points_cam = points_cam[mask_front]
+    points_world = points_world[mask_front]
+    colors = colors[mask_front]
 
-# filter point out of the image
-u,v= P_2D
-u_out = np.logical_or(u<0, u>imgw)
-v_out = np.logical_or(v<0, v>imgh)
-outlier = np.logical_or(u_out, v_out)
-P_2D = np.delete(P_2D,np.where(outlier),axis=1)
+    # Project points to image plane
+    proj = (K @ points_cam.T).T
+    u = (proj[:, 0] / proj[:, 2]).astype(int)
+    v = (proj[:, 1] / proj[:, 2]).astype(int)
 
-# generate color map from depth
-import matplotlib.pyplot as plt
-plt.rcParams["figure.figsize"] = (20,10)
-plt.axis([0,imgh,imgw,0])
-plt.imshow(image)
-plt.scatter([u],[v],c=1/P[2],cmap='jet',alpha=0.5,s=10)
-plt.savefig(f'result/plot.png',bbox_inches='tight')
-plt.show()
+    # Keep points inside image bounds
+    mask_img = (u >= 0) & (u < image.shape[1]) & (v >= 0) & (v < image.shape[0])
+    u, v = u[mask_img], v[mask_img]
+    points_world = points_world[mask_img]
+    colors = colors[mask_img]
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    # Assign colors from image
+    colors = image[v, u, :] / 255.0
+
+    # Collect points
+    all_points.append(points_world)
+    all_colors.append(colors)
+
+# Merge all frames
+all_points = np.vstack(all_points)
+all_colors = np.vstack(all_colors)
+
+# Create Open3D point cloud
+pcd = o3d.geometry.PointCloud()
+pcd.points = o3d.utility.Vector3dVector(all_points)
+pcd.colors = o3d.utility.Vector3dVector(all_colors)
+
+# smoother visualization
+pcd = pcd.voxel_down_sample(voxel_size=0.01)
+
+# remove statistical outliers
+pcd, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+
+# Visualize
+o3d.visualization.draw_geometries([pcd])
